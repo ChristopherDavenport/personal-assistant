@@ -1,0 +1,31 @@
+#!/usr/bin/env catscript
+// dependency: "io.chrisdavenport" %% "shellfish" % "0.0.5"
+
+import cats.effect._
+import cats.effect.syntax.all._
+import cats.syntax.all._
+import io.chrisdavenport.shellfish.Shell.io._
+import io.chrisdavenport.shellfish.SubProcess.io.{run => runS, _}
+import fs2._
+import scala.concurrent.duration._
+
+def run = {
+  for {
+    _ <- Resource.eval(cd("command-processor"))
+    _ <- Resource.eval(shellS("sbt", List("stage")))
+    _ <- Resource.eval(cd(".."))
+    runningServer <- runS("command-processor/target/universal/stage/bin/script", Nil)
+    _ <- Resource.eval(IO.sleep(2.seconds))
+    cwd <- Resource.eval(pwd)
+    runningPythonJob <- runS("asr/audio_processor.py", s"--model=$cwd/asr/model" :: Nil)
+
+    _ <-  Stream.eval(IO.race(runningServer.exitCode, runningPythonJob.exitCode))
+      .concurrently(
+        runningServer.outputUtf8.through(fs2.text.lines).evalMap(s => echo(s"Command-Processor: $s"))
+      ).concurrently(
+        runningPythonJob.outputUtf8.through(fs2.text.lines).evalMap(s => echo(s"ASR: $s"))
+      ).compile
+      .resource
+      .drain
+  } yield ()
+}.use(_ => IO.unit)
